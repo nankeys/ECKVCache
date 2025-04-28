@@ -1,0 +1,8 @@
+# .gitignore
+/build/
+/CMakeFiles/
+/Makefile
+/CMakeCache.txt
+/*.o
+/*.out
+/*.exe
