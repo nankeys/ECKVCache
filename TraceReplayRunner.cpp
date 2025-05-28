@@ -4,26 +4,33 @@
 #include <iostream>
 #include <chrono>
 #include <random>
+#include <stdio.h>
 
 TraceReplayRunner::TraceReplayRunner(const std::string& traceFile,
                                      const std::string& statFile,
                                      ErasureCacheClient& cacheClient)
     : tracePath(traceFile), statPath(statFile), client(cacheClient) {
     cleanup();
+    getchar();
+    std::cout << "正在写入。。。" << std::endl;
     loadStat();
 }
 
 void TraceReplayRunner::loadStat() {
     KVStatReader reader(statPath);
     bool flag;
-    std::cout << "2222222222222222" << std::endl;
     auto stats = reader.readAll();
-    std::cout << "1111111111111111" << std::endl;
     for (const auto& s : stats) {
         statMap[s.key] = s;
 
         // 模拟每个 key 对应一条4KB*k的数据并写入 memcached
-        std::vector<uint8_t> value(1024 * client.getK());
+        int valsize;
+        if(s.size % client.getK() == 0) {
+            valsize = s.size / client.getK();
+        } else {
+            valsize = (int)(s.size/client.getK()) + 1;
+        }
+        std::vector<uint8_t> value(valsize * client.getK());
         std::mt19937 rng(std::random_device{}());
         std::uniform_int_distribution<int> dist(0, 255);
         for (auto& byte : value) {
@@ -55,8 +62,9 @@ void TraceReplayRunner::run() {
 
         std::getline(ss, timestamp, ','); // 先读时间戳
         std::getline(ss, key, ',');        // 再读key
-        
 
+        if(total == 100) break;
+        
         total++;
         auto start = std::chrono::steady_clock::now();
         auto recovered = client.get(key);
@@ -70,7 +78,6 @@ void TraceReplayRunner::run() {
         } else {
             std::cout << "[FAIL] Key: " << key << ", Time: " << ms << "ms\n";
         }
-        if(key == "user1573987489603120213") break;
     }
 
     auto end_total = std::chrono::steady_clock::now();
@@ -82,12 +89,27 @@ void TraceReplayRunner::run() {
     //cleanup();
 }
 
+static memcached_return_t stat_printer(const memcached_instance_st *server,
+    const char *key, size_t key_length,
+    const char *value, size_t value_length,
+    void *context)
+{
+(void)server;
+(void)context;
+(void)key;
+(void)key_length;
+(void)value;
+(void)value_length;
+
+return MEMCACHED_SUCCESS;
+}
+
 void TraceReplayRunner::cleanup() {
     std::cout << "Flushing all data from Memcached...\n";
 
     for (auto memc : client.getClients()) {
         memcached_flush(memc, 0);
+        memcached_stat_execute(memc, "reset", stat_printer, NULL);
     }
-
     std::cout << "Flush complete.\n";
 }

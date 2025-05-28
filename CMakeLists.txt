@@ -10,14 +10,14 @@ find_library(MEMCACHED_LIBRARY memcached REQUIRED)
 include_directories(${ISAL_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-add_executable(ECKVCache
+add_executable(erasure_kv_cache
     main.cpp
     KVStatReader.cpp
     ErasureCacheClient.cpp
     TraceReplayRunner.cpp
 )
 
-target_link_libraries(ECKVCache
+target_link_libraries(erasure_kv_cache
     ${ISAL_LIBRARIES}
     ${MEMCACHED_LIBRARY}
 )
