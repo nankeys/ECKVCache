@@ -13,10 +13,10 @@ int main() {
 	    std::cout << "正在初始化中。。。" << std::endl;
         ErasureCacheClient client(servers, k, n);
 	    std::cout << "准备写入。。。" << std::endl;
-        TraceReplayRunner runner("trace.txt", "stat.txt", client);
+        TraceReplayRunner runner("../trace.txt", "../stat.txt", client);
         std::cout << "写入完成，准备读取。。。" << std::endl;
         getchar();
-        runner.run();
+        runner.run_1st();
         std::cout << "请随机停止一个节点。。。" << std::endl;
         getchar();
             runner.run();

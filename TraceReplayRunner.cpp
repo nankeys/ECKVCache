@@ -1,3 +1,4 @@
+
 #include "TraceReplayRunner.h"
 #include <sstream>
 #include <fstream>
@@ -5,6 +6,8 @@
 #include <chrono>
 #include <random>
 #include <stdio.h>
+#include <algorithm>
+#include <unordered_set>
 
 TraceReplayRunner::TraceReplayRunner(const std::string& traceFile,
                                      const std::string& statFile,
@@ -20,16 +23,21 @@ void TraceReplayRunner::loadStat() {
     KVStatReader reader(statPath);
     bool flag;
     auto stats = reader.readAll();
+
+    // 排序选择热数据
+    std::sort(stats.begin(), stats.end(), [](const KVStat& a, const KVStat& b) {
+        return a.frequency > b.frequency;
+    });
+
+    int hot_count = stats.size() * 0.2;
+    for (int i = 0; i < hot_count; ++i) {
+        hot_keys.insert(stats[i].key);
+    }
+
     for (const auto& s : stats) {
         statMap[s.key] = s;
 
-        // 模拟每个 key 对应一条4KB*k的数据并写入 memcached
-        int valsize;
-        if(s.size % client.getK() == 0) {
-            valsize = s.size / client.getK();
-        } else {
-            valsize = (int)(s.size/client.getK()) + 1;
-        }
+        int valsize = (s.size % client.getK() == 0) ? (s.size / client.getK()) : (s.size / client.getK() + 1);
         std::vector<uint8_t> value(valsize * client.getK());
         std::mt19937 rng(std::random_device{}());
         std::uniform_int_distribution<int> dist(0, 255);
@@ -45,6 +53,53 @@ void TraceReplayRunner::loadStat() {
     std::cout << "Load stat successfully!" << std::endl;
 }
 
+void TraceReplayRunner::run_1st() {
+    std::ifstream trace(tracePath);
+    if (!trace.is_open()) {
+        std::cerr << "Cannot open trace file: " << tracePath << std::endl;
+        return;
+    }
+
+    std::string line;
+    int total = 0, success = 0;
+    auto start_total = std::chrono::steady_clock::now();
+
+    while (std::getline(trace, line)) {
+        std::stringstream ss(line);
+        std::string timestamp, key;
+        std::getline(ss, timestamp, ',');
+        std::getline(ss, key, ',');
+
+        if(total == 100) break;
+        total++;
+
+        // if (hot_keys.count(key)) {
+            auto start = std::chrono::steady_clock::now();
+            auto recovered = client.get(key);
+            auto end = std::chrono::steady_clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+            if (!recovered.empty()) {
+                success++;
+                std::cout << "[SUCCESS] Key: " << key << ", Size: " << recovered.size()
+                          << ", Time: " << ms << "ms\n";
+            } else {
+                std::cout << "[FAIL] Key: " << key << ", Time: " << ms << "ms\n";
+            }
+        // } else {
+        //     cold_pending_keys.push_back(key);
+        // }
+    }
+
+    auto end_total = std::chrono::steady_clock::now();
+    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_total - start_total).count();
+    std::cout << "\nTrace replay complete. Total: " << total
+              << ", Success: " << success
+              << ", Duration: " << total_ms << "ms\n";
+
+    //repairColdData();
+}
+
 void TraceReplayRunner::run() {
     std::ifstream trace(tracePath);
     if (!trace.is_open()) {
@@ -57,26 +112,29 @@ void TraceReplayRunner::run() {
     auto start_total = std::chrono::steady_clock::now();
 
     while (std::getline(trace, line)) {
-	std::stringstream ss(line);
+        std::stringstream ss(line);
         std::string timestamp, key;
-
-        std::getline(ss, timestamp, ','); // 先读时间戳
-        std::getline(ss, key, ',');        // 再读key
+        std::getline(ss, timestamp, ',');
+        std::getline(ss, key, ',');
 
         if(total == 100) break;
-        
         total++;
-        auto start = std::chrono::steady_clock::now();
-        auto recovered = client.get(key);
-        auto end = std::chrono::steady_clock::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-        if (!recovered.empty()) {
-            success++;
-            std::cout << "[SUCCESS] Key: " << key << ", Size: " << recovered.size()
-                      << ", Time: " << ms << "ms\n";
+        if (hot_keys.count(key)) {
+            auto start = std::chrono::steady_clock::now();
+            auto recovered = client.get(key);
+            auto end = std::chrono::steady_clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+            if (!recovered.empty()) {
+                success++;
+                std::cout << "[SUCCESS] Key: " << key << ", Size: " << recovered.size()
+                          << ", Time: " << ms << "ms\n";
+            } else {
+                std::cout << "[FAIL] Key: " << key << ", Time: " << ms << "ms\n";
+            }
         } else {
-            std::cout << "[FAIL] Key: " << key << ", Time: " << ms << "ms\n";
+            cold_pending_keys.push_back(key);
         }
     }
 
@@ -85,8 +143,27 @@ void TraceReplayRunner::run() {
     std::cout << "\nTrace replay complete. Total: " << total
               << ", Success: " << success
               << ", Duration: " << total_ms << "ms\n";
-              
-    //cleanup();
+
+    repairColdData();
+}
+
+void TraceReplayRunner::repairColdData() {
+    std::cout << "\n[Repairing Cold Data During Idle Time...]\n";
+    int repaired = 0;
+
+    for (const auto& key : cold_pending_keys) {
+        auto recovered = client.get(key);
+        if (!recovered.empty()) {
+            repaired++;
+            std::cout << "[COLD-RECOVERED] Key: " << key << ", Size: " << recovered.size() << "\n";
+        } else {
+            std::cout << "[COLD-FAILED] Key: " << key << "\n";
+        }
+    }
+
+    std::cout << "[Cold Repair Complete] Total: " << cold_pending_keys.size()
+              << ", Success: " << repaired << "\n";
+    cold_pending_keys.clear();
 }
 
 static memcached_return_t stat_printer(const memcached_instance_st *server,
@@ -106,7 +183,6 @@ return MEMCACHED_SUCCESS;
 
 void TraceReplayRunner::cleanup() {
     std::cout << "Flushing all data from Memcached...\n";
-
     for (auto memc : client.getClients()) {
         memcached_flush(memc, 0);
         memcached_stat_execute(memc, "reset", stat_printer, NULL);
